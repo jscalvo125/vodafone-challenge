@@ -55,6 +55,9 @@ class NlpTrainer:
         #            new_cats[category] = 0.0
         return new_cats
 
+    def evaluate_test_set(self, text_gold_ds):
+        return self._nlp.evaluate(text_gold_ds)
+
     def batch_evaluate(self, texts, cats):
         docs = (self._nlp(text) for text in texts)
         tp = 0.0  # True positives
@@ -92,7 +95,26 @@ class NlpTrainer:
             f_score = 2 * (precision * recall) / (precision + recall)
         return {"pipeline":self._nlp, "textcat_p": precision, "textcat_r": recall, "textcat_f": f_score}
 
-    def load_data(self, train_dataframe, test_dataframe, categories):
+    def tranform_dataframe_into_gold_standard(self, data_frame, text_col: str, label_col: str):
+        gold_ds = []
+        for idx, instance in tqdm(data_frame.iterrows()):
+            doc = self._nlp(instance[text_col])
+            #    print([token.text for token in doc])
+            gold_annotation = GoldParse(doc, cats={instance[label_col]: 1.0})
+            gold_ds.append(gold_annotation)
+        return gold_ds
+
+    def transform_tuples_in_gold_standard(self, gs_texts, gs_categories):
+        return list(zip(gs_texts, [{'cats': cats} for cats in gs_categories]))
+
+    def load_data(self, train_dataframe, test_dataframe, text_col: str, label_col: str, categories):
+        # Converting the dataframe into a list of tuples
+        self._train_dataset['cat_tuples'] = self._train_dataset.apply(lambda row: (
+                                                 row[text_col], row[label_col].encode().decode("unicode-escape")),
+                                                 axis=1)
+        self._test_dataset['cat_tuples'] = self._test_dataset.apply(lambda row: (
+                                                 row[text_col], row[label_col].encode().decode("unicode-escape")),
+                                                 axis=1)
         train_data = train_dataframe['cat_tuples'].tolist()
         test_data = test_dataframe['cat_tuples'].tolist()
         texts, labels = zip(*train_data)
@@ -108,6 +130,18 @@ class NlpTrainer:
         # Splitting the training and evaluation data
         return (texts, cats), (test_texts, test_cats)
 
+    def normalize_categories(self, text_cats, categories):
+        new_text_cats = []
+        for text_cat in text_cats:
+            new_text_cat = {}
+            for cat in text_cat.keys():
+                new_text_cat[cat] = text_cat[cat]
+            for cat in categories:
+                if cat not in new_text_cat.keys():
+                    new_text_cat[cat] = 0.0
+            new_text_cats.append(new_text_cat)
+        return new_text_cats
+
     def train_model(self, text_col: str, label_col: str, classifier="simple_cnn"):
         logging.warning("Validating columns")
         if text_col not in self._train_dataset.keys() or text_col not in self._test_dataset.keys():
@@ -115,33 +149,21 @@ class NlpTrainer:
         if label_col not in self._train_dataset.keys() or label_col not in self._test_dataset.keys():
             raise AttributeError("label column {} not found in the train or test datasets".format(label_col))
         logging.warning("Transforming datasets into spacy-like format")
-        gold_ds = []
-        for idx, instance in tqdm(self._train_dataset.iterrows()):
-            doc = self._nlp(instance[text_col])
-            #    print([token.text for token in doc])
-            gold_annotation = GoldParse(doc, cats={instance[label_col]: 1.0})
-            gold_ds.append(gold_annotation)
 
         text_cat = self._nlp.create_pipe("textcat", config={"exclusive_classes": True, "architecture": classifier})
         self._nlp.add_pipe(text_cat, last=True)
+
         categories = self._train_dataset[label_col].unique()
         for category in categories:
             text_cat.add_label(category)
 
-        # Converting the dataframe into a list of tuples
-        self._train_dataset['cat_tuples'] = self._train_dataset.apply(lambda row: (
-                                                 row[text_col], row[label_col].encode().decode("unicode-escape")),
-                                                 axis=1)
-        self._test_dataset['cat_tuples'] = self._test_dataset.apply(lambda row: (
-                                                 row[text_col], row[label_col].encode().decode("unicode-escape")),
-                                                 axis=1)
-
         # Calling the load_data() function
-        (train_texts, train_cats), (test_texts, test_cats) = self.load_data(self._train_dataset, self._test_dataset, categories)
-
+        (train_texts, train_cats), (test_texts, test_cats) = self.load_data(self._train_dataset, self._test_dataset,
+                                                                            text_col, label_col,
+                                                                            categories)
         # Processing the final format of training data
-        train_data = list(zip(train_texts, [{'cats': cats} for cats in train_cats]))
-        test_data = list(zip(test_texts, [{'cats': cats} for cats in test_cats]))
+        train_data = self.transform_tuples_in_gold_standard(train_texts, self.normalize_categories(train_cats,
+                                                                                                   categories))
         # print(train_data[:2])
         # print(test_data[:2])
         pipe_exceptions = ["textcat", "trf_wordpiecer", "trf_tok2vec"]
@@ -150,22 +172,23 @@ class NlpTrainer:
         with self._nlp.disable_pipes(*other_pipes):  # only train textcat
             optimizer = self._nlp.begin_training()
             logging.warning("Training the model...")
-            logging.warning("Iterations {}".format(10))
+            logging.warning("Iterations {}".format(3))
             # logging.warning("{:^5}\t{:^5}\t{:^5}\t{:^5}".format("LOSS", "P", "R", "F"))
-            batch_sizes = compounding(4.0, 32.0, 1.001)
-            for i in tqdm(range(10)):
+            for i in tqdm(range(3)):
                 losses = {}
                 # batch up the examples using spaCy's minibatch
                 random.shuffle(train_data)
-                batches = minibatch(train_data, size=1000)
+                batches = minibatch(train_data, size=1)
                 print("batch size {}".format(len(train_data)))
                 for batch in batches:
                     # print("batch {}".format(batch))
                     texts, annotations = zip(*batch)
                     doc = self._nlp(texts[0])
                     # tp, fp, tn, fn = self.update_metrics(doc, annotations[0], tp, fp, tn, fn)
-                    self._nlp.update(texts, annotations, sgd=optimizer, drop=0.2, losses=losses)
+                    self._nlp.update(texts, annotations, sgd=optimizer, drop=0.1, losses=losses)
         return self.batch_evaluate(test_texts, test_cats)
+#        return self.evaluate_test_set(test_data)
+
         # vectorizer = TfidfVectorizer(tokenizer=self.spacy_tokenizer)
         #
         # if feature_type == "tf-idf":

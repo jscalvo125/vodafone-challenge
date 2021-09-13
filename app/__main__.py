@@ -9,7 +9,7 @@ dir_name = os.path.dirname(__file__)
 model_path_name = os.path.join(dir_name, "../models/trained_model.pkl")
 test_data_name = os.path.join(dir_name, "../data/dataset_en_test.json")
 
-recommender = ProductsRecommender(test_data_name, 'reviewer_id', 'product_id')
+recommender = ProductsRecommender(test_data_name, 'reviewer_id', 'product_id', model="en_core_web_lg")
 with open(model_path_name, "rb") as input_file:
     spacy_pipeline = pickle.load(input_file)
 

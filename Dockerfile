@@ -5,6 +5,7 @@ COPY requirements.txt /
 RUN pip install -r requirements.txt && \
     python -m spacy download en_core_web_sm && \
     python -m spacy download en_core_web_md
+RUN pip install models/en_core_web_lg-2.3.1.tar.gz
 # Set the WORKDIR to be the folder
 COPY . .
 # Expose port 8080
